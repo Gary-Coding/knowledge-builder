@@ -1,0 +1,80 @@
+node_types:
+  - type: Service
+    desc: 微服务或独立应用模块
+    required: [id, desc]
+    optional: [port]
+
+  - type: Controller
+    desc: REST 控制器或对外入口
+    required: [id, service, path, desc]
+    optional: [url_prefix, apis]
+
+  - type: ServiceClass
+    desc: 业务服务类，接口和实现可合并为一个节点
+    required: [id, service, path, desc]
+    optional: [key_methods]
+
+  - type: Repository
+    desc: 仓储层组件
+    required: [id, service, path, desc]
+    optional: []
+
+  - type: Mapper
+    desc: MyBatis 或其他数据访问 Mapper
+    required: [id, service, path, desc]
+    optional: [xml_path]
+
+  - type: Table
+    desc: 数据库表
+    required: [id, desc]
+    optional: [db, key_fields, status_enum]
+
+  - type: Entity
+    desc: E、DO 或跨服务契约 DTO
+    required: [id, service, path, kind, desc]
+    optional: []
+
+  - type: Convertor
+    desc: DTO、E、DO 之间的对象转换器
+    required: [id, service, path, desc]
+    optional: []
+
+  - type: Enum
+    desc: 业务枚举
+    required: [id, service, path, desc, values]
+    optional: []
+
+  - type: FeignClient
+    desc: 跨服务客户端接口
+    required: [id, service, path, target_service, desc]
+    optional: []
+
+  - type: MQTopic
+    desc: MQ topic 或 tag
+    required: [id, desc]
+    optional: [tags, message_type]
+
+  - type: Consumer
+    desc: MQ 消费者
+    required: [id, service, path, desc]
+    optional: [consumer_group]
+
+  - type: Job
+    desc: 定时任务
+    required: [id, service, path, desc]
+    optional: [cron]
+
+  - type: Util
+    desc: 关键工具类或外部客户端
+    required: [id, service, path, desc]
+    optional: []
+
+  - type: ExternalSystem
+    desc: 外部系统
+    required: [id, desc]
+    optional: [protocol]
+
+  - type: BusinessDomain
+    desc: 业务域
+    required: [id, desc]
+    optional: [owner, status]

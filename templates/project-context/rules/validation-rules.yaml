@@ -1,0 +1,65 @@
+validation_rules:
+  - id: graph_node_type_must_be_defined
+    target: graph/curated/*.yaml
+    check: node_type_exists
+    desc: graph 中的节点 type 必须在 ontology/node-types.yaml 中定义。
+
+  - id: graph_node_required_properties_must_exist
+    target: graph/curated/*.yaml
+    check: node_required_properties_exist
+    desc: graph 节点必须包含对应类型声明的全部 required 属性。
+
+  - id: graph_relation_must_be_defined
+    target: graph/curated/*.yaml
+    check: relation_type_exists
+    desc: graph 中的 rel 必须在 ontology/relation-types.yaml 中定义。
+
+  - id: graph_relation_endpoints_must_match
+    target: graph/curated/*.yaml
+    check: relation_endpoint_types_match
+    desc: 每条边的 from/to 节点类型必须符合关系端点约束。
+
+  - id: graph_path_must_exist
+    target: graph/curated/*.yaml
+    check: file_path_exists
+    desc: 带 path 的节点必须能在关联代码仓库中找到。
+
+  - id: concept_type_must_be_defined
+    target: domains/*/concepts.yaml
+    check: concept_type_exists
+    desc: 每个 concept 的 type 必须在 ontology/concept-types.yaml 中定义。
+
+  - id: concept_related_reference_must_exist
+    target: domains/*/concepts.yaml
+    check: concept_related_reference_exists
+    desc: concept.related 引用的概念必须存在或登记为相邻域概念。
+
+  - id: every_capability_has_concept
+    target: domains/*/capabilities.yaml
+    check: capability_has_concept
+    desc: 每个 capability 至少关联一个有效 concept。
+
+  - id: every_capability_has_mapping
+    target: domains/*/capabilities.yaml
+    check: capability_exists_in_mappings
+    desc: 每个 capability 必须在 mappings 中存在代码映射。
+
+  - id: every_mapping_node_exists_in_graph
+    target: mappings/*.mapping.yaml
+    check: graph_node_reference_exists
+    desc: mappings 引用的 graph_nodes 必须存在于对应 graph。
+
+  - id: every_core_table_has_domain
+    target: graph/curated/*.yaml
+    check: table_has_domain_mapping
+    desc: 每张核心表必须通过 belongs_to 或 capability mapping 归属业务域。
+
+  - id: every_high_rule_has_code_mapping
+    target: domains/*/rules.yaml
+    check: high_severity_rule_has_mapping
+    desc: 每条 high 业务规则必须映射到代码节点。
+
+  - id: verified_commit_must_be_present
+    target: graph/curated/*.yaml
+    check: verified_commit_present
+    desc: 已验证事实必须记录关联仓库 commit。

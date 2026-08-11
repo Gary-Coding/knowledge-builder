@@ -1,0 +1,65 @@
+relation_types:
+  - rel: invokes
+    desc: 外部系统调用本系统入口
+    from: [ExternalSystem]
+    to: [Controller]
+
+  - rel: calls
+    desc: 同进程调用
+    from: [Controller, ServiceClass, Entity, Repository, Consumer, Job, Util]
+    to: [ServiceClass, Entity, Repository, Mapper, FeignClient, Util]
+
+  - rel: feign_calls
+    desc: 跨服务调用
+    from: [Controller, ServiceClass, FeignClient, Job]
+    to: [Service, Controller, ExternalSystem]
+
+  - rel: reads
+    desc: 读取数据库表
+    from: [ServiceClass, Repository, Mapper, Consumer, Job]
+    to: [Table]
+
+  - rel: writes
+    desc: 写入数据库表或外部存储
+    from: [ServiceClass, Repository, Mapper, Consumer, Job]
+    to: [Table, ExternalSystem]
+
+  - rel: references
+    desc: 表间业务引用或外键式关联，不代表运行时查询
+    from: [Table]
+    to: [Table]
+
+  - rel: converts
+    desc: DTO、E、DO 之间的对象转换
+    from: [Convertor]
+    to: [Entity]
+
+  - rel: publishes
+    desc: 发布 MQ 消息
+    from: [ServiceClass, Consumer, Job]
+    to: [MQTopic]
+
+  - rel: consumes
+    desc: 消费 MQ 消息
+    from: [MQTopic]
+    to: [Consumer]
+
+  - rel: syncs_to
+    desc: 同步或推送到外部系统
+    from: [Service, ServiceClass, FeignClient, Consumer, Job]
+    to: [ExternalSystem]
+
+  - rel: maps
+    desc: 对象到表或技术入口到业务域的映射
+    from: [Entity, Controller, ServiceClass]
+    to: [Table, BusinessDomain]
+
+  - rel: belongs_to
+    desc: 技术节点归属业务域
+    from: [Controller, ServiceClass, Repository, Mapper, Table, MQTopic, Consumer, Job]
+    to: [BusinessDomain]
+
+  - rel: triggers
+    desc: 间接触发任务、服务或消费者
+    from: [Controller, ServiceClass, Consumer, Job, MQTopic]
+    to: [Job, ServiceClass, Consumer]

@@ -1,0 +1,50 @@
+concept_types:
+  - type: domain_entity
+    name: 领域实体
+    desc: 具有业务身份和生命周期的核心业务对象，例如商品、门店、渠道。
+
+  - type: relation_entity
+    name: 关系实体
+    desc: 表达两个或多个领域对象之间可独立维护的业务关系。
+
+  - type: state_entity
+    name: 状态实体
+    desc: 表达业务对象当前可判断、可迁移的状态，例如履约状态和审核状态。
+
+  - type: process_entity
+    name: 过程实体
+    desc: 表达由多个步骤组成的业务过程，例如权限下发和商品上下架。
+
+  - type: process_state
+    name: 过程状态
+    desc: 表达异步流程、任务或审批过程中的阶段与处理状态。
+
+  - type: value_object
+    name: 值对象
+    desc: 没有独立业务身份、由属性值定义的业务概念，例如时间窗和价格区间。
+
+  - type: business_identifier
+    name: 业务标识
+    desc: 在业务范围内稳定识别对象的编码、组合键或命名规则。
+
+  - type: business_rule
+    name: 业务规则概念
+    desc: 多个能力共享并影响业务判定的规则性概念。
+
+  - type: async_artifact
+    name: 异步制品
+    desc: 业务流程中的消息、事件、任务记录或中转数据。
+
+  - type: config_entity
+    name: 配置实体
+    desc: 影响业务行为的开关、阈值、字典或运行配置。
+
+  - type: external_system
+    name: 外部系统概念
+    desc: 业务语义层依赖或同步的外部平台与系统。
+
+concept_schema:
+  required: [id, name, type, desc]
+  optional: [related, status, aliases]
+  id_rule: 同一产品中心内稳定唯一，使用小写 kebab-case 或 snake_case
+  related_rule: related 中的概念 id 必须存在于当前域或明确登记的相邻域

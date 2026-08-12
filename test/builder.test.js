@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildPrompt,
+  createDomainFromMaterial,
   normalizeRepoPaths,
   publishKnowledgeAssets,
   writeDraftTemplates,
@@ -78,4 +79,58 @@ test("publishKnowledgeAssets 发布规则目录并跳过提示词", async (t) =>
   assert.deepEqual(result.copied, ["ontology", "domains", "graph", "mappings", "rules"]);
   assert.deepEqual(result.skipped, ["AI_PROMPT.md"]);
   await assert.rejects(fs.access(path.join(publishDir, "AI_PROMPT.md")));
+});
+
+test("同一中心原料可以生成多个业务域且不复制代码上下文", async (t) => {
+  const materialDir = path.join(
+    process.cwd(),
+    "workspace",
+    "materials",
+    "test-center",
+    `test-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  const repomixDir = path.join(materialDir, "repomix");
+  const convertedDocsDir = path.join(materialDir, "converted-docs");
+  const contextPath = path.join(repomixDir, "service-core.md");
+  const repoManifestPath = path.join(repomixDir, "README.md");
+  const knowledgeRagDocsDir = await fs.mkdtemp("/tmp/knowledge-builder-rag-");
+  t.after(() => fs.rm(materialDir, { recursive: true, force: true }));
+  t.after(() => fs.rm(knowledgeRagDocsDir, { recursive: true, force: true }));
+
+  await fs.mkdir(repomixDir, { recursive: true });
+  await fs.mkdir(convertedDocsDir, { recursive: true });
+  await fs.writeFile(contextPath, "shared source context");
+  await fs.writeFile(repoManifestPath, "# repositories\n");
+  await fs.writeFile(path.join(materialDir, "material.json"), JSON.stringify({
+    version: 1,
+    materialId: "test-material",
+    productName: "测试中心",
+    productSlug: "test-center",
+    createdAt: "2026-08-12T00:00:00.000Z",
+    convertedDocsDir,
+    repoManifestPath,
+    repositories: [{ name: "service-core", path: "/tmp/service-core", commit: "abc", contextPath }],
+  }));
+
+  const first = await createDomainFromMaterial({
+    materialDir,
+    domainName: "业务域一",
+    domainSlug: "domain-one",
+    knowledgeRagDocsDir,
+  });
+  const second = await createDomainFromMaterial({
+    materialDir,
+    domainName: "业务域二",
+    domainSlug: "domain-two",
+    knowledgeRagDocsDir,
+  });
+
+  assert.equal(first.materialDir, second.materialDir);
+  assert.equal(first.repoManifestPath, second.repoManifestPath);
+  assert.notEqual(first.runDir, second.runDir);
+  assert.equal(await fs.readFile(contextPath, "utf8"), "shared source context");
+  assert.match(await fs.readFile(first.promptPath, "utf8"), /业务域一/);
+  assert.match(await fs.readFile(second.promptPath, "utf8"), /业务域二/);
+  await assert.rejects(fs.access(path.join(first.runDir, "repomix")));
+  await assert.rejects(fs.access(path.join(second.runDir, "repomix")));
 });

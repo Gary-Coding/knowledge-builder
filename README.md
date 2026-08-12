@@ -2,7 +2,7 @@
 
 Knowledge Builder 是一个面向存量微服务的业务域知识库构建工具。它以业务域而不是单个项目为维护单元，聚合一个业务域涉及的多个代码仓库，生成产品、开发、测试共同使用的知识资产，并发布给 [knowledge-rag](https://github.com/lyonzin/knowledge-rag) 供 Agent 通过 MCP 检索。
 
-> 当前版本是半自动工作流：工具负责资料转换、代码上下文提取、本体骨架、AI 任务提示词和发布；AI 深读代码、知识补全、人工校准以及 MCP 重建索引仍需显式执行。
+> 当前版本是半自动工作流：同一产品或业务中心先生成一次共享代码原料，再基于该原料创建多个业务域任务。AI 深读代码、知识补全、人工校准以及 MCP 重建索引仍需显式执行。
 
 ## 适用场景
 
@@ -20,6 +20,7 @@ Knowledge Builder 不负责自动发现企业全部业务域，也不会仅凭�
 | 一个业务域聚合多个微服务仓库 | 已支持 |
 | Word、PDF、Excel、PPT、HTML 资料转换 | 已支持，需要 MarkItDown |
 | 多仓库代码上下文提取和 commit 记录 | 已支持，使用 Repomix |
+| 同一业务中心原料复用于多个业务域 | 已支持 |
 | 业务本体、代码图谱和映射骨架 | 已支持 |
 | 面向 AI 的深读代码提示词 | 已支持 |
 | 发布到 knowledge-rag 文档目录 | 已支持 |
@@ -31,35 +32,36 @@ Knowledge Builder 不负责自动发现企业全部业务域，也不会仅凭�
 
 ```mermaid
 flowchart LR
-    A["明确业务域边界"] --> B["选择多个微服务仓库"]
-    B --> C["Repomix 提取代码上下文"]
-    A --> D["MarkItDown 转换补充资料"]
-    C --> E["生成本体骨架和 AI_PROMPT.md"]
-    D --> E
-    E --> F["AI 深读代码并补全 drafts"]
-    F --> G["产品、开发、测试校准"]
-    G --> H["发布到 knowledge-rag"]
-    H --> I["MCP 重建索引"]
-    I --> J["Agent 检索使用"]
+    A["选择中心的多个微服务仓库"] --> B["生成共享中心原料"]
+    B --> C1["业务域 A 的草稿和提示词"]
+    B --> C2["业务域 B 的草稿和提示词"]
+    B --> C3["业务域 N 的草稿和提示词"]
+    C1 --> D["AI 补全与人工校准"]
+    C2 --> D
+    C3 --> D
+    D --> E["发布并重建 MCP 索引"]
 ```
 
-一次构建会在 `workspace/runs/<run-id>/` 下生成：
+中心原料和业务域任务分别保存：
 
 ```text
-<run-id>/
-├── converted-docs/       # 非代码资料转换结果
-├── repomix/              # 每个仓库的代码上下文和仓库清单
-├── drafts/               # 待 AI 补全和人工校准的知识资产
-│   ├── ontology/
-│   ├── domains/
-│   ├── graph/
-│   ├── mappings/
-│   ├── rules/
-│   └── AI_PROMPT.md
-└── README.md             # 本次构建的路径和后续操作
+workspace/
+├── materials/<product>/<material-id>/
+│   ├── material.json     # 产品、仓库、commit 和上下文路径清单
+│   ├── converted-docs/   # 共享的非代码资料转换结果
+│   └── repomix/          # 共享的多仓库代码上下文
+└── runs/<domain-run-id>/
+    ├── drafts/           # 单个业务域的知识资产骨架
+    │   ├── ontology/
+    │   ├── domains/
+    │   ├── graph/
+    │   ├── mappings/
+    │   ├── rules/
+    │   └── AI_PROMPT.md
+    └── README.md         # 记录本业务域引用的中心原料
 ```
 
-`AI_PROMPT.md` 是构建任务说明，不属于最终知识资产，发布时会自动跳过。
+业务域 run 不复制 Repomix 结果，只引用中心原料中的绝对路径。代码仓库 commit 发生变化时，应显式生成一份新原料；旧业务域任务仍保留原始 commit 的可追溯性。`AI_PROMPT.md` 不属于最终知识资产，发布时会自动跳过。
 
 ## 知识库结构
 
@@ -202,10 +204,10 @@ KB_PORT=3287 npm start
 页面操作顺序：
 
 1. 选择 knowledge-rag 的 `documents` 目录。
-2. 填写产品或业务中心、业务域名称和边界。
-3. 添加该业务域涉及的所有代码仓库。
-4. 按需选择补充资料目录。
-5. 点击“生成原料”，等待 Repomix 完成。
+2. 填写产品或业务中心，添加该中心的全部代码仓库和可选资料目录。
+3. 点击“生成新原料”，等待 Repomix 完成；以后可以从下拉框直接选择它。
+4. 填写业务域名称和边界，点击“生成业务域提示词”。
+5. 连续整理其他业务域时，只修改业务域名称和边界，不再运行 Repomix。
 6. 读取 `AI_PROMPT.md`，交给能够访问本地构建目录的 AI 执行。
 7. 校准 `drafts` 中的知识资产后点击“发布入库”。
 
@@ -213,30 +215,36 @@ KB_PORT=3287 npm start
 
 ### CLI 模式
 
-下面以一个通用的示例业务域为例：
+先为业务中心生成一次原料：
 
 ```bash
-node server/index.js build \
+kb material \
   --product sample-center \
-  --domain sample-domain \
-  --scope "本次需要整理的业务范围以及明确排除的相邻范围" \
   --repo /path/to/sample-web \
   --repo /path/to/sample-core \
   --repo /path/to/sample-worker \
-  --docs /path/to/supplementary-docs \
-  --knowledge-rag-docs /path/to/knowledge-rag/documents
+  --docs /path/to/supplementary-docs
 ```
 
-`--docs` 是可选参数。也可以注册本地命令：
+命令会返回原料目录。随后可以基于同一目录生成任意数量的业务域任务：
 
 ```bash
-npm link
-kb build --product sample-center --domain sample-domain \
-  --repo /path/to/sample-core \
+kb domain \
+  --material /path/to/knowledge-builder/workspace/materials/sample-center/<material-id> \
+  --domain sample-domain-a \
+  --scope "业务域 A 的范围和排除项" \
+  --knowledge-rag-docs /path/to/knowledge-rag/documents
+
+kb domain \
+  --material /path/to/knowledge-builder/workspace/materials/sample-center/<material-id> \
+  --domain sample-domain-b \
+  --scope "业务域 B 的范围和排除项" \
   --knowledge-rag-docs /path/to/knowledge-rag/documents
 ```
 
-CLI 当前负责生成原料，不会自动发布。根据命令输出打开 `drafts` 和 `AI_PROMPT.md`，完成 AI 补全与人工校准后，可通过页面发布或将以下目录复制到目标业务域：`ontology`、`domains`、`graph`、`mappings`、`rules`。
+使用 CLI 前可执行 `npm link` 注册 `kb`。`--docs` 是可选参数。原有 `kb build` 命令仍保留，会一次性生成新原料和一个业务域任务，适合单次使用；连续整理同一中心时应使用 `material + domain`，避免重复运行 Repomix。
+
+CLI 当前不会自动发布。根据命令输出打开 `drafts` 和 `AI_PROMPT.md`，完成 AI 补全与人工校准后，可通过页面发布或将以下目录复制到目标业务域：`ontology`、`domains`、`graph`、`mappings`、`rules`。
 
 ## 接入 knowledge-rag MCP
 
@@ -287,6 +295,7 @@ server/                      # 构建与发布服务
 templates/project-context/   # 共享本体和规则模板
 test/                        # Node.js 测试
 workspace/runs/              # 本地构建产物，不提交 Git
+workspace/materials/         # 可复用的中心原料，不提交 Git
 ```
 
 ## 当前边界与后续方向

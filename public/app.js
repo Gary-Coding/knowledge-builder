@@ -2,8 +2,10 @@ const $ = (id) => document.getElementById(id);
 const logs = $("logs");
 const taskBadge = $("taskBadge");
 let lastBuildResult = null;
+let materials = [];
 let workspaceDir = "";
 let isBuilding = false;
+let isMaterialBuilding = false;
 let isPublishing = false;
 
 const actionLabels = {};
@@ -23,6 +25,7 @@ function values() {
     repoDirs: $("repoDirs").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
     rawDocsDir: $("rawDocsDir").value.trim(),
     knowledgeRagDocsDir: $("knowledgeRagDocsDir").value.trim(),
+    materialDir: $("materialSelect").value,
   };
 }
 
@@ -73,8 +76,9 @@ async function withButtonState(buttonId, busyLabel, action, options = {}) {
 }
 
 function updateActionAvailability() {
-  $("buildBtn").disabled = isBuilding;
-  $("publishBtn").disabled = isBuilding || isPublishing || !lastBuildResult;
+  $("materialBtn").disabled = isMaterialBuilding || isBuilding;
+  $("buildBtn").disabled = isBuilding || isMaterialBuilding || !$("materialSelect").value;
+  $("publishBtn").disabled = isBuilding || isMaterialBuilding || isPublishing || !lastBuildResult;
   $("loadPromptBtn").disabled = isBuilding || !lastBuildResult;
   $("copyPromptBtn").disabled = !$("promptPreview").value;
   $("openRunBtn").disabled = !lastBuildResult;
@@ -82,17 +86,17 @@ function updateActionAvailability() {
 
 function updateResultSummary() {
   const r = lastBuildResult || {};
+  if (!lastBuildResult) {
+    $("resultSummary").innerHTML = '<div class="empty-summary">生成业务域后显示关键路径</div>';
+    return;
+  }
   const items = [
-    ["产品或业务中心", r.productName || "生成后显示"],
-    ["业务域", r.domainName || "生成后显示"],
-    ["关联服务", r.repositories?.map((repo) => repo.name).join("、") || "生成后显示"],
-    ["业务域边界", r.domainScope || "未填写"],
-    ["运行目录", r.runDir || "生成后显示"],
-    ["草稿目录", r.draftsDir || "生成后显示"],
-    ["AI 提示词", r.promptPath || "生成后显示"],
-    ["多仓库清单", r.repoManifestPath || "生成后显示"],
-    ["转换资料", r.convertedDocsDir || "生成后显示"],
-    ["建议发布目录", r.publishDir || "生成后显示"],
+    ["产品或业务中心", r.productName],
+    ["业务域", r.domainName],
+    ["关联服务", r.repositories?.map((repo) => repo.name).join("、") || "无"],
+    ["使用中心原料", r.materialDir],
+    ["AI 提示词", r.promptPath],
+    ["建议发布目录", r.publishDir],
   ];
   $("resultSummary").innerHTML = items
     .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
@@ -112,7 +116,41 @@ function updateTargetPreview() {
 async function boot() {
   const health = await fetch("/api/health").then((r) => r.json());
   workspaceDir = health.workspaceDir;
+  await refreshMaterials();
   updateResultSummary();
+  updateTargetPreview();
+  updateActionAvailability();
+}
+
+async function refreshMaterials(preferredDir = "") {
+  const data = await fetch("/api/materials").then((response) => response.json());
+  materials = data.materials || [];
+  const select = $("materialSelect");
+  const current = preferredDir || select.value;
+  select.innerHTML = '<option value="">请先生成或选择一份中心原料</option>' + materials
+    .map((material) => {
+      const createdAt = material.createdAt ? new Date(material.createdAt).toLocaleString() : "未知时间";
+      const label = `${material.productName} · ${createdAt} · ${material.repositories.length} 个仓库`;
+      return `<option value="${escapeHtml(material.materialDir)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  if (current && materials.some((material) => material.materialDir === current)) select.value = current;
+  syncSelectedMaterial();
+}
+
+function syncSelectedMaterial() {
+  const selected = materials.find((material) => material.materialDir === $("materialSelect").value);
+  if (!selected) {
+    $("productName").readOnly = false;
+    $("materialStatus").textContent = "代码版本变化后再生成新原料。";
+    $("materialStatus").className = "";
+    updateActionAvailability();
+    return;
+  }
+  $("productName").value = selected.productName;
+  $("productName").readOnly = true;
+  $("materialStatus").textContent = `已选择 ${selected.repositories.length} 个仓库的原料，生成于 ${new Date(selected.createdAt).toLocaleString()}`;
+  $("materialStatus").className = "ok";
   updateTargetPreview();
   updateActionAvailability();
 }
@@ -162,18 +200,29 @@ async function validatePaths() {
   }
 }
 
+async function createMaterial() {
+  const v = values();
+  if (!v.productName) throw new Error("请填写产品或业务中心名称");
+  if (!v.repoDirs.length && !v.rawDocsDir) throw new Error("请至少添加一个代码仓库或补充资料目录");
+  isMaterialBuilding = true;
+  updateActionAvailability();
+  taskBadge.textContent = "正在生成中心原料";
+  taskBadge.className = "badge running";
+  const result = await postJson("/api/materials", v);
+  log(`原料任务已提交：${result.taskId}`);
+}
+
 async function build() {
   const v = values();
   if (!v.knowledgeRagDocsDir) throw new Error("请选择 knowledge-rag 文档目录");
-  if (!v.productName) throw new Error("请填写产品或业务中心名称");
+  if (!v.materialDir) throw new Error("请先生成或选择中心原料");
   if (!v.domainName) throw new Error("请填写业务域名");
-  if (!v.repoDirs.length && !v.rawDocsDir) throw new Error("请至少添加一个代码仓库或补充资料目录");
   isBuilding = true;
   updateActionAvailability();
   taskBadge.textContent = "执行中";
   taskBadge.className = "badge running";
-  const result = await postJson("/api/build", v);
-  log(`任务已提交：${result.taskId}`);
+  const result = await postJson("/api/domains", v);
+  log(`业务域任务已提交：${result.taskId}`);
 }
 
 async function loadPrompt() {
@@ -229,6 +278,16 @@ function connectEvents() {
         taskBadge.className = "badge running";
       }
       if (payload.status === "done") {
+        if (payload.taskType === "material") {
+          isMaterialBuilding = false;
+          setButtonBusy($("materialBtn"), false, "生成中...");
+          taskBadge.textContent = "中心原料已就绪";
+          taskBadge.className = "badge done";
+          refreshMaterials(payload.result.materialDir).catch((error) => log(error.message, "stderr"));
+          log(`中心原料：${payload.result.materialDir}`);
+          updateActionAvailability();
+          return;
+        }
         isBuilding = false;
         setButtonBusy($("buildBtn"), false, "生成中...");
         lastBuildResult = payload.result;
@@ -243,8 +302,10 @@ function connectEvents() {
       }
       if (payload.status === "failed") {
         isBuilding = false;
+        isMaterialBuilding = false;
         isPublishing = false;
         setButtonBusy($("buildBtn"), false, "生成中...");
+        setButtonBusy($("materialBtn"), false, "生成中...");
         setButtonBusy($("publishBtn"), false, "发布中...");
         taskBadge.textContent = "失败";
         taskBadge.className = "badge failed";
@@ -272,6 +333,15 @@ function bind() {
       log(error.message, "stderr");
     });
   });
+  $("materialBtn").addEventListener("click", () => {
+    withButtonState("materialBtn", "生成中...", createMaterial, { keepBusy: true }).catch((error) => {
+      isMaterialBuilding = false;
+      setButtonBusy($("materialBtn"), false, "生成中...");
+      updateActionAvailability();
+      log(error.message, "stderr");
+    });
+  });
+  $("materialSelect").addEventListener("change", syncSelectedMaterial);
   $("loadPromptBtn").addEventListener("click", () => {
     withButtonState("loadPromptBtn", "读取中...", loadPrompt).catch((error) => log(error.message, "stderr"));
   });

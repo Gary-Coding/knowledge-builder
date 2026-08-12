@@ -13,98 +13,119 @@
           <div>
             <p class="eyebrow">CLI 优先 · 页面看板辅助</p>
             <h1>按业务域构建存量代码知识库</h1>
-            <p class="subtitle">聚合多个微服务的代码事实，生成产品、开发、测试共用并可由 knowledge-rag MCP 检索的知识资产。</p>
+            <p class="subtitle">中心原料一次生成，多个业务域复用；输出可由 knowledge-rag MCP 检索。</p>
           </div>
           <span id="taskBadge" class="badge">待开始</span>
         </header>
 
-        <section class="stage-card hero-card">
-          <div class="stage-title">
-            <span>默认策略</span>
-            <strong>轻量本体骨架</strong>
-          </div>
-          <p>
-            业务域是维护和检索单元，微服务是事实节点。默认生成 <code>domains</code>、<code>graph</code>、
-            <code>mappings</code>、<code>ontology</code> 和质量规则，未验证推断不会进入事实层。
-          </p>
-        </section>
+        <div class="workbench">
+          <div class="control-column">
+            <section class="step-panel active">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">01 · Material</p>
+                  <h2>业务中心原料</h2>
+                </div>
+                <button id="openWorkspaceBtn" type="button">打开工作区</button>
+              </div>
 
-        <section class="step-panel active">
+              <div class="target-preview" aria-live="polite">
+                <div>
+                  <span>当前中心 / 业务域</span>
+                  <strong id="targetTitle">未填写产品中心 / 未填写业务域</strong>
+                </div>
+                <div>
+                  <span>业务域发布位置</span>
+                  <code id="targetPath">code-knowledge/未填写产品中心/未填写业务域/</code>
+                </div>
+              </div>
+
+              <div class="material-section">
+                <div class="section-label">发布设置</div>
+                <div class="field field-flat">
+                  <label for="knowledgeRagDocsDir">knowledge-rag 文档目录</label>
+                  <div class="path-control">
+                    <input id="knowledgeRagDocsDir" readonly placeholder="未选择" />
+                    <button type="button" data-pick="knowledgeRagDocsDir" data-prompt="选择 knowledge-rag documents 目录">选择目录</button>
+                  </div>
+                  <small id="knowledgeRagDocsDirStatus"></small>
+                </div>
+              </div>
+
+              <div class="material-section">
+                <div class="section-label">选择中心原料</div>
+                <div class="form-grid material-choice-grid">
+                  <div class="field field-flat">
+                    <label for="productName">产品或业务中心</label>
+                    <input id="productName" placeholder="例如 sample-center" />
+                  </div>
+                  <div class="field field-flat">
+                    <label for="materialSelect">已有中心原料</label>
+                    <select id="materialSelect">
+                      <option value="">请先生成或选择一份中心原料</option>
+                    </select>
+                    <small id="materialStatus">代码版本变化后再生成新原料。</small>
+                  </div>
+                </div>
+              </div>
+
+              <div class="material-section source-section">
+                <div class="section-head">
+                  <div>
+                    <div class="section-label">生成或更新原料</div>
+                    <small>仅在首次接入或代码版本变化时执行</small>
+                  </div>
+                  <div class="source-actions">
+                    <button id="validateBtn" type="button">检查路径</button>
+                    <button id="materialBtn" type="button" class="primary">生成新原料</button>
+                  </div>
+                </div>
+                <div class="form-grid source-grid">
+                  <div class="field field-flat">
+                    <div class="field-label-row">
+                      <label for="repoDirs">关联代码仓库</label>
+                      <button type="button" class="compact-button" data-pick="repoDirs" data-pick-mode="append" data-prompt="添加一个关联代码仓库">添加仓库</button>
+                    </div>
+                    <textarea id="repoDirs" class="repo-list" placeholder="每行一个仓库路径"></textarea>
+                    <small id="repoDirsStatus"></small>
+                  </div>
+                  <div class="field field-flat">
+                    <label for="rawDocsDir">补充资料目录（可选）</label>
+                    <div class="path-control">
+                      <input id="rawDocsDir" readonly placeholder="未选择" />
+                      <button type="button" data-pick="rawDocsDir" data-prompt="选择补充资料目录">选择目录</button>
+                    </div>
+                    <small id="rawDocsDirStatus"></small>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="step-panel active domain-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">02 · Domain</p>
+                  <h2>生成业务域</h2>
+                </div>
+              </div>
+              <div class="domain-form-row">
+                <div class="field field-flat">
+                  <label for="domainName">业务域名</label>
+                  <input id="domainName" placeholder="例如 order-fulfillment" />
+                </div>
+                <div class="field field-flat">
+                  <label for="domainScope">业务域边界说明</label>
+                  <textarea id="domainScope" class="compact-textarea" placeholder="说明覆盖范围以及明确排除的相邻域。"></textarea>
+                </div>
+                <button id="buildBtn" type="button" class="primary domain-submit">生成提示词</button>
+              </div>
+            </section>
+
+            <section class="step-panel active result-panel">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">Build</p>
-              <h2>输入最少信息</h2>
-            </div>
-            <button id="openWorkspaceBtn" type="button">打开工作区</button>
-          </div>
-
-          <div class="target-preview" aria-live="polite">
-            <div>
-              <span>当前构建目标</span>
-              <strong id="targetTitle">未填写产品中心 / 未填写业务域</strong>
-            </div>
-            <div>
-              <span>最终发布位置</span>
-              <code id="targetPath">code-knowledge/未填写产品中心/未填写业务域/</code>
-            </div>
-          </div>
-
-          <div class="form-grid">
-            <div class="field span-2">
-              <label for="knowledgeRagDocsDir">knowledge-rag 文档目录</label>
-              <div class="path-control">
-                <input id="knowledgeRagDocsDir" readonly placeholder="未选择" />
-                <button type="button" data-pick="knowledgeRagDocsDir" data-prompt="选择 knowledge-rag documents 目录">选择目录</button>
-              </div>
-              <small id="knowledgeRagDocsDirStatus"></small>
-            </div>
-
-            <div class="field">
-              <label for="productName">产品或业务中心</label>
-              <input id="productName" placeholder="例如 sample-center" />
-            </div>
-
-            <div class="field">
-              <label for="domainName">业务域名</label>
-              <input id="domainName" placeholder="例如 self-sku" />
-            </div>
-
-            <div class="field span-2">
-              <label for="domainScope">业务域边界说明（可选）</label>
-              <textarea id="domainScope" class="compact-textarea" placeholder="说明这次只覆盖哪个业务域，排除哪些相邻域。"></textarea>
-              <small>同一服务下有商品、价格、权限等多个业务域时，用这里锁定当前范围。</small>
-            </div>
-
-            <div class="field">
-              <label for="repoDirs">关联代码仓库（每行一个）</label>
-              <textarea id="repoDirs" class="repo-list" placeholder="/path/to/sample-web&#10;/path/to/sample-core&#10;/path/to/sample-worker"></textarea>
-              <div class="field-actions">
-                <button type="button" data-pick="repoDirs" data-pick-mode="append" data-prompt="添加一个关联代码仓库">添加仓库</button>
-              </div>
-              <small id="repoDirsStatus"></small>
-            </div>
-
-            <div class="field">
-              <label for="rawDocsDir">补充资料目录（可选）</label>
-              <div class="path-control">
-                <input id="rawDocsDir" readonly placeholder="未选择" />
-                <button type="button" data-pick="rawDocsDir" data-prompt="选择补充资料目录">选择目录</button>
-              </div>
-              <small id="rawDocsDirStatus"></small>
-            </div>
-          </div>
-
-          <div class="actions">
-            <button id="validateBtn" type="button">检查路径</button>
-            <button id="buildBtn" type="button" class="primary">一键生成原料</button>
-          </div>
-        </section>
-
-        <section class="step-panel active">
-          <div class="panel-head">
-            <div>
-              <p class="panel-kicker">Result</p>
-              <h2>输出位置</h2>
+              <p class="panel-kicker">03 · Result</p>
+              <h2>业务域输出</h2>
             </div>
             <div class="actions inline">
               <button id="loadPromptBtn" type="button">读取提示词</button>
@@ -113,26 +134,31 @@
               <button id="publishBtn" type="button" class="primary">发布入库</button>
             </div>
           </div>
-          <div class="summary-grid" id="resultSummary"></div>
-          <div class="prompt-box full">
-            <div class="prompt-head">
-              <span>AI_PROMPT.md</span>
-              <small id="promptStatus">等待生成</small>
-            </div>
-            <textarea id="promptPreview" readonly placeholder="生成完成后，这里会展示 AI 整理提示词。"></textarea>
+              <div class="summary-grid" id="resultSummary"></div>
+            </section>
           </div>
-        </section>
 
-        <section class="log-panel">
-          <div class="panel-head">
-            <div>
-              <p class="panel-kicker">Runtime</p>
-              <h2>执行日志</h2>
-            </div>
-            <button id="clearLogBtn" type="button">清空</button>
-          </div>
-          <pre id="logs" class="logs"></pre>
-        </section>
+          <aside class="runtime-column">
+            <section class="log-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Runtime</p>
+                  <h2>执行日志</h2>
+                </div>
+                <button id="clearLogBtn" type="button">清空</button>
+              </div>
+              <pre id="logs" class="logs"></pre>
+            </section>
+
+            <section class="prompt-box full">
+              <div class="prompt-head">
+                <span>AI_PROMPT.md</span>
+                <small id="promptStatus">等待生成</small>
+              </div>
+              <textarea id="promptPreview" readonly placeholder="生成完成后，这里会展示 AI 整理提示词。"></textarea>
+            </section>
+          </aside>
+        </div>
       </section>
     </main>
     <script src="/app.js"></script>

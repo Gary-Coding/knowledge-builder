@@ -18,8 +18,10 @@ const workspaceDir = path.join(rootDir, "workspace");
 const projectContextTemplateDir = path.join(rootDir, "templates", "project-context");
 const defaultPort = Number(process.env.KB_PORT || 3187);
 const runRootDir = path.join(workspaceDir, "runs");
+const materialRootDir = path.join(workspaceDir, "materials");
 const isMainModule = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-const cliMode = isMainModule && process.argv[2] === "build";
+const cliCommand = isMainModule ? process.argv[2] : "";
+const cliMode = ["build", "material", "domain"].includes(cliCommand);
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(rootDir, "public")));
@@ -341,19 +343,68 @@ async function publishKnowledgeAssets(draftsDir, publishDir) {
   };
 }
 
-async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
-  emit("task", { taskId, status: "running", step: "prepare" });
+function assertMaterialDir(targetPath) {
+  const resolved = assertInsideUserSpace(targetPath);
+  const materialRoot = path.resolve(materialRootDir);
+  if (resolved !== materialRoot && !resolved.startsWith(materialRoot + path.sep)) {
+    throw new Error(`原料目录必须位于工作区 materials 下：${resolved}`);
+  }
+  return resolved;
+}
+
+async function readMaterial(materialDir) {
+  const resolved = assertMaterialDir(materialDir);
+  const manifestPath = path.join(resolved, "material.json");
+  let material;
+  try {
+    material = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  } catch {
+    throw new Error(`无效的中心原料，缺少或无法读取 material.json：${resolved}`);
+  }
+  if (!material.productName || !material.productSlug || !Array.isArray(material.repositories)) {
+    throw new Error(`中心原料清单字段不完整：${manifestPath}`);
+  }
+  const materialPaths = [
+    material.convertedDocsDir,
+    material.repoManifestPath,
+    ...material.repositories.map((repo) => repo.contextPath),
+  ];
+  if (materialPaths.some((value) => {
+    const resolvedPath = path.resolve(String(value || ""));
+    return resolvedPath !== resolved && !resolvedPath.startsWith(resolved + path.sep);
+  })) {
+    throw new Error(`中心原料清单包含原料目录之外的上下文路径：${manifestPath}`);
+  }
+  return { ...material, materialDir: resolved, manifestPath };
+}
+
+async function listMaterials() {
+  if (!fsSync.existsSync(materialRootDir)) return [];
+  const productDirs = await fs.readdir(materialRootDir, { withFileTypes: true });
+  const materials = [];
+  for (const productEntry of productDirs) {
+    if (!productEntry.isDirectory()) continue;
+    const productDir = path.join(materialRootDir, productEntry.name);
+    const entries = await fs.readdir(productDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        materials.push(await readMaterial(path.join(productDir, entry.name)));
+      } catch {
+        // Ignore incomplete material directories left by interrupted builds.
+      }
+    }
+  }
+  return materials.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+async function createCenterMaterial(payload, taskId = crypto.randomUUID()) {
+  emit("task", { taskId, taskType: "material", status: "running", step: "prepare-material" });
   const productName = String(payload.productName || payload.serviceName || "").trim();
   if (!productName) throw new Error("请填写产品或业务中心名称");
-  const domainName = String(payload.domainName || "").trim();
-  if (!domainName) throw new Error("请填写业务域名称");
-  const domainScope = String(payload.domainScope || "").trim();
   const productSlug = slugify(payload.productSlug || payload.serviceSlug || productName);
-  const domainSlug = slugify(payload.domainSlug || domainName);
   const repoPaths = normalizeRepoPaths(payload);
   const rawDocsDir = payload.rawDocsDir ? assertInsideUserSpace(payload.rawDocsDir) : "";
-  if (!payload.knowledgeRagDocsDir) throw new Error("请选择 knowledge-rag 文档目录");
-  const knowledgeRagDocsDir = assertInsideUserSpace(payload.knowledgeRagDocsDir);
   if (repoPaths.length === 0 && !rawDocsDir) throw new Error("请至少添加一个代码仓库或补充资料目录");
 
   const repositories = [];
@@ -361,18 +412,16 @@ async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
   const duplicateNames = repositories.filter((repo, index) => repositories.findIndex((item) => item.name === repo.name) !== index);
   if (duplicateNames.length) throw new Error(`仓库目录名重复，无法生成稳定服务标识：${[...new Set(duplicateNames.map((repo) => repo.name))].join(", ")}`);
 
-  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${productSlug}-${domainSlug}`;
-  const runDir = path.join(runRootDir, runId);
-  const convertedDocsDir = path.join(runDir, "converted-docs");
-  const repomixDir = path.join(runDir, "repomix");
+  const createdAt = new Date().toISOString();
+  const materialId = `${createdAt.replace(/[:.]/g, "-")}-${productSlug}`;
+  const materialDir = path.join(materialRootDir, productSlug, materialId);
+  const convertedDocsDir = path.join(materialDir, "converted-docs");
+  const repomixDir = path.join(materialDir, "repomix");
   const repoManifestPath = path.join(repomixDir, "README.md");
-  const draftsDir = path.join(runDir, "drafts");
-  const publishDir = path.join(knowledgeRagDocsDir, "code-knowledge", productSlug, domainSlug);
-
-  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(materialDir, { recursive: true });
 
   if (rawDocsDir) {
-    emit("task", { taskId, status: "running", step: "convert-docs" });
+    emit("task", { taskId, taskType: "material", status: "running", step: "convert-docs" });
     await convertDocs(rawDocsDir, convertedDocsDir);
   } else {
     await fs.mkdir(convertedDocsDir, { recursive: true });
@@ -380,23 +429,64 @@ async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
 
   await fs.mkdir(repomixDir, { recursive: true });
   for (const repo of repositories) {
-    emit("task", { taskId, status: "running", step: `repomix:${repo.name}` });
+    emit("task", { taskId, taskType: "material", status: "running", step: `repomix:${repo.name}` });
     repo.contextPath = path.join(repomixDir, `${slugify(repo.name)}.md`);
     await runRepomix(repo.path, repo.contextPath);
   }
   await fs.writeFile(
     repoManifestPath,
-    `# ${productName} / ${domainName} 多仓库代码上下文\n\n${repositories.map((repo) => `- ${repo.name}\n  - 路径：${repo.path}\n  - commit：${repo.commit}\n  - 上下文：${repo.contextPath}`).join("\n") || "未提供代码仓库。"}\n`,
+    `# ${productName} 多仓库代码原料\n\n${repositories.map((repo) => `- ${repo.name}\n  - 路径：${repo.path}\n  - commit：${repo.commit}\n  - 上下文：${repo.contextPath}`).join("\n") || "未提供代码仓库。"}\n`,
   );
 
-  emit("task", { taskId, status: "running", step: "drafts" });
-  const verifiedCommits = Object.fromEntries(repositories.map((repo) => [repo.name, repo.commit]));
+  const material = {
+    version: 1,
+    materialId,
+    productName,
+    productSlug,
+    createdAt,
+    rawDocsDir,
+    convertedDocsDir,
+    repoManifestPath,
+    repositories,
+  };
+  await fs.writeFile(path.join(materialDir, "material.json"), JSON.stringify(material, null, 2) + "\n");
+  return { taskId, ...material, materialDir };
+}
+
+async function createDomainFromMaterial(payload, taskId = crypto.randomUUID()) {
+  emit("task", { taskId, taskType: "domain", status: "running", step: "prepare-domain" });
+  const material = await readMaterial(payload.materialDir);
+  const productName = material.productName;
+  const productSlug = material.productSlug;
+  const domainName = String(payload.domainName || "").trim();
+  if (!domainName) throw new Error("请填写业务域名称");
+  const domainScope = String(payload.domainScope || "").trim();
+  const domainSlug = slugify(payload.domainSlug || domainName);
+  if (!payload.knowledgeRagDocsDir) throw new Error("请选择 knowledge-rag 文档目录");
+  const knowledgeRagDocsDir = assertInsideUserSpace(payload.knowledgeRagDocsDir);
+  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${productSlug}-${domainSlug}`;
+  const runDir = path.join(runRootDir, runId);
+  const draftsDir = path.join(runDir, "drafts");
+  const publishDir = path.join(knowledgeRagDocsDir, "code-knowledge", productSlug, domainSlug);
+  await fs.mkdir(runDir, { recursive: true });
+
+  emit("task", { taskId, taskType: "domain", status: "running", step: "drafts" });
+  const verifiedCommits = Object.fromEntries(material.repositories.map((repo) => [repo.name, repo.commit]));
   await writeDraftTemplates(draftsDir, domainName, domainSlug, verifiedCommits);
   const promptPath = path.join(draftsDir, "AI_PROMPT.md");
-  await fs.writeFile(promptPath, buildPrompt({ productName, domainName, domainScope, convertedDocsDir, repositories, repoManifestPath, draftsDir, domainSlug }));
+  await fs.writeFile(promptPath, buildPrompt({
+    productName,
+    domainName,
+    domainScope,
+    convertedDocsDir: material.convertedDocsDir,
+    repositories: material.repositories,
+    repoManifestPath: material.repoManifestPath,
+    draftsDir,
+    domainSlug,
+  }));
   await fs.writeFile(
     path.join(runDir, "README.md"),
-    `# ${productName} / ${domainName} 知识库构建任务\n\n- 产品或业务中心：${productName}\n- 业务域：${domainName}\n- 业务域边界：${domainScope || "未填写"}\n- 关联服务：${repositories.map((repo) => repo.name).join("、") || "无"}\n- 运行目录：${runDir}\n- 转换资料：${convertedDocsDir}\n- 多仓库清单：${repoManifestPath}\n- 草稿目录：${draftsDir}\n- AI 提示词：${promptPath}\n- 发布目录：${publishDir}\n\n下一步：复制 AI_PROMPT.md 给 AI 执行，人工校准 drafts 后发布入库，并通过 knowledge-rag MCP 调用 reindex_documents(force=true)。\n`,
+    `# ${productName} / ${domainName} 知识库构建任务\n\n- 产品或业务中心：${productName}\n- 业务域：${domainName}\n- 业务域边界：${domainScope || "未填写"}\n- 中心原料：${material.materialDir}\n- 原料生成时间：${material.createdAt}\n- 关联服务：${material.repositories.map((repo) => repo.name).join("、") || "无"}\n- 运行目录：${runDir}\n- 转换资料：${material.convertedDocsDir}\n- 多仓库清单：${material.repoManifestPath}\n- 草稿目录：${draftsDir}\n- AI 提示词：${promptPath}\n- 发布目录：${publishDir}\n\n下一步：复制 AI_PROMPT.md 给 AI 执行，人工校准 drafts 后发布入库，并通过 knowledge-rag MCP 调用 reindex_documents(force=true)。\n`,
   );
 
   return {
@@ -407,9 +497,12 @@ async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
     domainSlug,
     domainScope,
     runDir,
-    convertedDocsDir,
-    repoManifestPath,
-    repositories,
+    materialDir: material.materialDir,
+    materialId: material.materialId,
+    materialCreatedAt: material.createdAt,
+    convertedDocsDir: material.convertedDocsDir,
+    repoManifestPath: material.repoManifestPath,
+    repositories: material.repositories,
     draftsDir,
     promptPath,
     publishDir,
@@ -417,9 +510,36 @@ async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
   };
 }
 
+async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
+  const material = payload.materialDir
+    ? await readMaterial(payload.materialDir)
+    : await createCenterMaterial(payload, taskId);
+  return createDomainFromMaterial({ ...payload, materialDir: material.materialDir }, taskId);
+}
+
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, workspaceDir, runRootDir });
+  res.json({ ok: true, workspaceDir, runRootDir, materialRootDir });
 });
+
+app.get("/api/materials", async (_req, res) => {
+  res.json({ materials: await listMaterials() });
+});
+
+function startAsyncTask(req, res, taskType, action) {
+  const taskId = crypto.randomUUID();
+  res.json({ taskId });
+  queueMicrotask(async () => {
+    try {
+      const result = await action(req.body || {}, taskId);
+      emit("task", { taskId, taskType, status: "done", step: "done", result });
+    } catch (error) {
+      emit("task", { taskId, taskType, status: "failed", error: error.message });
+    }
+  });
+}
+
+app.post("/api/materials", (req, res) => startAsyncTask(req, res, "material", createCenterMaterial));
+app.post("/api/domains", (req, res) => startAsyncTask(req, res, "domain", createDomainFromMaterial));
 
 app.post("/api/path-info", async (req, res) => {
   try {
@@ -475,21 +595,7 @@ app.post("/api/open-path", async (req, res) => {
 });
 
 app.post("/api/build", async (req, res) => {
-  const taskId = crypto.randomUUID();
-  res.json({ taskId });
-  queueMicrotask(async () => {
-    try {
-      const result = await buildKnowledgeBase(req.body || {}, taskId);
-      emit("task", {
-        taskId,
-        status: "done",
-        step: "done",
-        result,
-      });
-    } catch (error) {
-      emit("task", { taskId, status: "failed", error: error.message });
-    }
-  });
+  startAsyncTask(req, res, "domain", buildKnowledgeBase);
 });
 
 app.post("/api/publish", async (req, res) => {
@@ -536,6 +642,9 @@ function parseCliBuildArgs(argv) {
     } else if (arg === "--knowledge-rag-docs") {
       result.knowledgeRagDocsDir = next;
       i += 1;
+    } else if (arg === "--material") {
+      result.materialDir = next;
+      i += 1;
     }
   }
   return result;
@@ -545,15 +654,26 @@ if (!isMainModule) {
   // Imported by tests or other local tooling.
 } else if (cliMode) {
   const payload = parseCliBuildArgs(process.argv.slice(3));
-  buildKnowledgeBase(payload)
+  const action = cliCommand === "material"
+    ? createCenterMaterial
+    : cliCommand === "domain"
+      ? createDomainFromMaterial
+      : buildKnowledgeBase;
+  action(payload)
     .then((result) => {
-      console.log("\n构建原料已完成：");
+      if (cliCommand === "material") {
+        console.log("\n中心原料已生成：");
+        console.log(`原料目录：${result.materialDir}`);
+        console.log(`多仓库清单：${result.repoManifestPath}`);
+        console.log(`转换资料：${result.convertedDocsDir}`);
+        return;
+      }
+      console.log("\n业务域任务已生成：");
+      console.log(`使用原料：${result.materialDir}`);
       console.log(`运行目录：${result.runDir}`);
       if (result.domainScope) console.log(`业务域边界：${result.domainScope}`);
       console.log(`草稿目录：${result.draftsDir}`);
       console.log(`AI 提示词：${result.promptPath}`);
-      console.log(`多仓库清单：${result.repoManifestPath}`);
-      console.log(`转换资料：${result.convertedDocsDir}`);
       console.log(`建议发布目录：${result.publishDir}`);
     })
     .catch((error) => {
@@ -576,4 +696,15 @@ if (!isMainModule) {
   });
 }
 
-export { buildKnowledgeBase, buildPrompt, normalizeRepoPaths, publishKnowledgeAssets, slugify, writeDraftTemplates };
+export {
+  buildKnowledgeBase,
+  buildPrompt,
+  createCenterMaterial,
+  createDomainFromMaterial,
+  listMaterials,
+  normalizeRepoPaths,
+  publishKnowledgeAssets,
+  readMaterial,
+  slugify,
+  writeDraftTemplates,
+};

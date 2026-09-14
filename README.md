@@ -1,8 +1,8 @@
 # Knowledge Builder
 
-Knowledge Builder 是一个面向存量微服务的业务域知识库构建工具。它以业务域而不是单个项目为维护单元，聚合一个业务域涉及的多个代码仓库，生成产品、开发、测试共同使用的知识资产，并发布给 [knowledge-rag](https://github.com/lyonzin/knowledge-rag) 供 Agent 通过 MCP 检索。
+Knowledge Builder 是一个面向存量微服务的业务域知识库构建工具。它以业务域而不是单个项目为维护单元，聚合一个业务域涉及的多个代码仓库，生成产品、开发、测试共同使用的通用知识资产。生成结果是普通 Markdown/YAML，可导出到任意目录，再由 Git、文档站点或 RAG 平台消费。
 
-> 当前版本是半自动工作流：同一产品或业务中心先生成一次共享代码原料，再基于该原料创建多个业务域任务。AI 深读代码、知识补全、人工校准以及 MCP 重建索引仍需显式执行。
+> 同一产品或业务中心只需生成一次共享代码原料，即可创建多个业务域任务。页面可以显式调用本地 Codex 或 Claude Code 深读代码，并在校验和人工确认后导出；执行所需的任务提示词保存在运行目录中，不在页面展示。
 
 ## 适用场景
 
@@ -23,10 +23,9 @@ Knowledge Builder 不负责自动发现企业全部业务域，也不会仅凭�
 | 同一业务中心原料复用于多个业务域 | 已支持 |
 | 业务本体、代码图谱和映射骨架 | 已支持 |
 | 面向 AI 的深读代码提示词 | 已支持 |
-| 发布到 knowledge-rag 文档目录 | 已支持 |
-| 自动调用模型补全知识 | 未支持 |
-| 自动执行本体完整性校验 | 未支持，当前提供声明式规则 |
-| 自动调用 knowledge-rag MCP 重建索引 | 未支持 |
+| 导出到通用知识库目录 | 已支持 |
+| 检测并调用本地 Codex / Claude Code | 已支持，需用户显式启动 |
+| 自动执行本体完整性校验 | 已支持 |
 
 ## 工作流程
 
@@ -36,10 +35,11 @@ flowchart LR
     B --> C1["业务域 A 的草稿和提示词"]
     B --> C2["业务域 B 的草稿和提示词"]
     B --> C3["业务域 N 的草稿和提示词"]
-    C1 --> D["AI 补全与人工校准"]
+    C1 --> D["Codex / Claude 或手动 AI 补全"]
     C2 --> D
     C3 --> D
-    D --> E["发布并重建 MCP 索引"]
+    D --> E["校验与人工确认"]
+    E --> F["导出通用知识资产"]
 ```
 
 中心原料和业务域任务分别保存：
@@ -61,14 +61,14 @@ workspace/
     └── README.md         # 记录本业务域引用的中心原料
 ```
 
-业务域 run 不复制 Repomix 结果，只引用中心原料中的绝对路径。代码仓库 commit 发生变化时，应显式生成一份新原料；旧业务域任务仍保留原始 commit 的可追溯性。`AI_PROMPT.md` 不属于最终知识资产，发布时会自动跳过。
+业务域 run 不复制 Repomix 结果，只引用中心原料中的绝对路径。代码仓库 commit 发生变化时，应显式生成一份新原料；旧业务域任务仍保留原始 commit 的可追溯性。`AI_PROMPT.md` 不属于最终知识资产，导出时会自动跳过。
 
 ## 知识库结构
 
 最终以产品和业务域组织：
 
 ```text
-knowledge-rag/documents/code-knowledge/
+<output-dir>/code-knowledge/
 └── <product>/
     └── <domain>/
         ├── ontology/
@@ -167,7 +167,7 @@ maps         belongs_to   triggers
 - npm
 - Git
 - 可选：Python 3 和 [MarkItDown](https://github.com/microsoft/markitdown)，用于转换非代码资料
-- 一个可写的 knowledge-rag `documents` 目录
+- 可选：本地安装并登录 Codex CLI 或 Claude Code，用于自动补全知识
 
 安装项目：
 
@@ -203,13 +203,15 @@ KB_PORT=3287 npm start
 
 页面操作顺序：
 
-1. 选择 knowledge-rag 的 `documents` 目录。
-2. 填写产品或业务中心，添加该中心的全部代码仓库和可选资料目录。
-3. 点击“生成新原料”，等待 Repomix 完成；以后可以从下拉框直接选择它。
-4. 填写业务域名称和边界，点击“生成业务域提示词”。
-5. 连续整理其他业务域时，只修改业务域名称和边界，不再运行 Repomix。
-6. 读取 `AI_PROMPT.md`，交给能够访问本地构建目录的 AI 执行。
-7. 校准 `drafts` 中的知识资产后点击“发布入库”。
+1. 填写产品或业务中心，添加该中心的全部代码仓库和可选资料目录。
+2. 点击“生成新原料”，等待 Repomix 完成；以后可以从下拉框直接选择它。
+3. 填写业务域名称和边界，点击“生成骨架”。
+4. 选择检测为“就绪”的 Codex 或 Claude 并显式点击“开始执行”；如需人工处理，可打开运行目录使用其中的任务文件。
+5. 查看实时日志，执行完成后点击“校验产物”，再人工检查 `drafts` 中的知识资产。页面展示 AI 的阶段进度、工具调用和简短工作摘要，不输出模型的私有逐步思维链；Codex/Claude 的完整 stdout/stderr 会保存在运行目录的 `execution.log` 中。
+6. 可选择通用知识库输出目录，点击“导出知识资产”；未选择时使用工作区默认目录。
+7. 连续整理其他业务域时，只修改业务域名称和边界，不再运行 Repomix。
+
+AI 执行不会自动导出。执行进程成功退出也不等于知识资产有效，必须通过 Markdown/YAML、本体关系和映射完整性校验，并由使用者确认后才能导出。
 
 页面目录选择器当前仅支持 macOS。其他系统建议使用 CLI。
 
@@ -233,34 +235,28 @@ kb domain \
   --material /path/to/knowledge-builder/workspace/materials/sample-center/<material-id> \
   --domain sample-domain-a \
   --scope "业务域 A 的范围和排除项" \
-  --knowledge-rag-docs /path/to/knowledge-rag/documents
+  --output /path/to/knowledge-assets
 
 kb domain \
   --material /path/to/knowledge-builder/workspace/materials/sample-center/<material-id> \
   --domain sample-domain-b \
-  --scope "业务域 B 的范围和排除项" \
-  --knowledge-rag-docs /path/to/knowledge-rag/documents
+  --scope "业务域 B 的范围和排除项"
 ```
 
 使用 CLI 前可执行 `npm link` 注册 `kb`。`--docs` 是可选参数。原有 `kb build` 命令仍保留，会一次性生成新原料和一个业务域任务，适合单次使用；连续整理同一中心时应使用 `material + domain`，避免重复运行 Repomix。
 
-CLI 当前不会自动发布。根据命令输出打开 `drafts` 和 `AI_PROMPT.md`，完成 AI 补全与人工校准后，可通过页面发布或将以下目录复制到目标业务域：`ontology`、`domains`、`graph`、`mappings`、`rules`。
+`--output` 是可选参数；不传时使用工作区默认知识库目录。可以通过 CLI 检测执行器并完成执行、校验和导出：
 
-## 接入 knowledge-rag MCP
-
-确保 knowledge-rag 的 `documents_dir` 指向发布目录的上级 `documents`，并启用 `.md`、`.yaml`、`.yml` 文件索引。发布完成后，在已连接 knowledge-rag MCP 的 Agent 中执行：
-
-```text
-reindex_documents(force=true)
+```bash
+kb executors
+kb execute --run /path/to/workspace/runs/<run-id> --executor codex
+kb validate --run /path/to/workspace/runs/<run-id>
+kb export --run /path/to/workspace/runs/<run-id> --output /path/to/knowledge-assets
 ```
 
-随后可以使用：
+`--executor` 可选 `codex` 或 `claude`。AI 执行不会自动导出；执行完成后仍须校验和人工确认。最终可通过页面或 CLI 导出 `ontology`、`domains`、`graph`、`mappings`、`rules`。
 
-```text
-search_knowledge(query="订单取消会更新哪些表")
-search_knowledge(query="履约状态变更涉及哪些服务和 MQ")
-get_document(...)
-```
+`--output-dir` 是 `--output` 的同义参数。页面和 API 统一使用 `outputRootDir` 和 `/api/runs/:runId/exports`。
 
 建议从以下维度验收检索结果：
 
@@ -276,7 +272,7 @@ get_document(...)
 - 业务到代码的定位关系进入 `mappings`。
 - 未确认推断标记为 `UNVERIFIED`，不得伪装成代码事实。
 - `meta.verified_commits` 逐仓记录验证版本；代码漂移后应重新核查。
-- Controller、Feign、MQ、核心表、状态枚举、业务判定或外部同步发生变化时，应同步更新知识资产并重建索引。
+- Controller、Feign、MQ、核心表、状态枚举、业务判定或外部同步发生变化时，应同步更新知识资产；如果下游使用检索平台，再按平台要求重建索引。
 
 ## 开发与测试
 
@@ -291,7 +287,7 @@ node --check public/app.js
 ```text
 bin/                         # 本地 kb 命令
 public/                      # 本地页面
-server/                      # 构建与发布服务
+server/                      # 构建、执行、校验与导出服务
 templates/project-context/   # 共享本体和规则模板
 test/                        # Node.js 测试
 workspace/runs/              # 本地构建产物，不提交 Git
@@ -302,13 +298,13 @@ workspace/materials/         # 可复用的中心原料，不提交 Git
 
 当前版本有以下边界：
 
-- 不直接调用模型，避免绑定模型供应商和密钥。
+- 只调用本机已安装且已登录的 Codex CLI 或 Claude Code，不托管模型密钥。
 - 不自动划分业务域，业务边界需要人工输入。
-- 校验规则尚未接入可执行校验器。
-- 发布后不会自动调用 knowledge-rag MCP。
-- 页面不持久化本地路径和构建历史。
+- AI 任务默认逐个执行，单任务超时上限为 120 分钟，支持取消和日志限制；不会使用跳过权限检查的参数。分析提示词采用“范围优先、证据扩展”策略，先闭环业务主链路，再按调用证据补读相关配置、SQL、消息和测试，避免无关模块拖慢任务。
+- 导出后不会自动调用外部平台。
+- 业务域运行状态会写入 `run.json`，但页面暂未提供完整历史列表。
 
-优先的后续方向是：接入可选 AI 执行器、实现本体校验器、发布后自动重建索引并执行检索验收，以及提供增量代码变更驱动的知识回写。
+优先的后续方向是：增加更多可选执行器与导出适配器、提供检索验收，以及支持增量代码变更驱动的知识回写。
 
 ## License
 

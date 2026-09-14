@@ -9,6 +9,14 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
+import {
+  cancelExecution,
+  detectExecutors,
+  getExecution,
+  listExecutions,
+  startExecution,
+} from "./executors.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -19,9 +27,10 @@ const projectContextTemplateDir = path.join(rootDir, "templates", "project-conte
 const defaultPort = Number(process.env.KB_PORT || 3187);
 const runRootDir = path.join(workspaceDir, "runs");
 const materialRootDir = path.join(workspaceDir, "materials");
+const knowledgeRootDir = path.join(workspaceDir, "knowledge");
 const isMainModule = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 const cliCommand = isMainModule ? process.argv[2] : "";
-const cliMode = ["build", "material", "domain"].includes(cliCommand);
+const cliMode = ["build", "material", "domain", "executors", "execute", "validate", "export"].includes(cliCommand);
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(rootDir, "public")));
@@ -190,7 +199,7 @@ ${repoLines}
 输出目录：
 - ${draftsDir}
 
-最终发布位置会是：
+通用导出目录结构：
 - code-knowledge/<product>/<domain>/
 - 本次产品或业务中心：${productName}
 - 本次业务域：${domainName}
@@ -246,6 +255,12 @@ ${repoLines}
 - 每个 concept 必须包含 id、name、type、desc、related、status；related 只引用当前域已定义概念，跨域引用必须明确登记来源。
 - 同一业务概念不要仅因分布在多个服务而重复创建；服务归属进入 graph，业务到代码的联系进入 mappings。
 - 严格围绕本次业务域边界整理；相邻业务域只作为依赖、上下游或排除项说明。
+- 采用“范围优先、证据扩展”的分析策略：先从业务域入口（Controller/API/Event/Job）、入口调用到 Service/Domain Service，再追踪 Feign/MQ、Repository/Mapper、Table/Entity 和外部系统；只有当调用链或规则需要时，才补读配置、SQL、转换器、枚举和测试。
+- 分两阶段执行：阶段一只定向定位入口、事件、Job 及其直接调用，先产出候选文件清单；阶段二仅沿候选链路递归读取，最多扩展到跨服务边界、读写表、异常/事务和相关测试。
+- 不要从头到尾逐字阅读所有仓库原料，也不要为了补充背景扫描与本业务域无调用关系的模块；优先使用多仓库清单和定向搜索定位文件，再读取命中的上下文。
+- 每条主流程至少闭环到“入口→核心服务→数据读写/跨服务调用→状态或结果→异常/回滚”；完成主链路后执行一次遗漏检查，确认未漏掉 Feign、MQ、定时任务、事务和测试证据。
+- 相邻模块只读取用于确认边界或依赖的最小上下文；无法证明与本域相关时，记录为排除项或需确认，不扩展为主知识。
+- 每个主流程至少保留 1 个入口、1 条完整调用链、1 项数据或外部交互、1 项异常/回滚和 1 条测试证据；没有测试证据时标记 UNVERIFIED，不得静默跳过。无调用证据的模块列入排除项，范围外依赖最多保留 1 跳摘要。
 - 重要结论后标注来源，例如：来源：ClassName#method 或 Mapper.xml#selectXxx。
 - graph 中带 path 的节点必须是真实文件路径；不确定时不要写入事实层，改写入 UNVERIFIED 或 pitfalls。
 - path 格式统一为 <仓库名>/<仓库内相对路径>，跨服务同名节点以仓库名消歧。
@@ -326,14 +341,14 @@ async function copyDir(source, target) {
   await fs.cp(source, target, { recursive: true, force: true });
 }
 
-async function publishKnowledgeAssets(draftsDir, publishDir) {
-  await fs.mkdir(publishDir, { recursive: true });
+async function exportKnowledgeAssets(draftsDir, exportDir) {
+  await fs.mkdir(exportDir, { recursive: true });
   const assetDirs = ["ontology", "domains", "graph", "mappings", "rules"];
   const copied = [];
   for (const dirName of assetDirs) {
     const source = path.join(draftsDir, dirName);
     if (!fsSync.existsSync(source)) continue;
-    const target = path.join(publishDir, dirName);
+    const target = path.join(exportDir, dirName);
     await fs.cp(source, target, { recursive: true, force: true });
     copied.push(dirName);
   }
@@ -341,6 +356,252 @@ async function publishKnowledgeAssets(draftsDir, publishDir) {
     copied,
     skipped: ["AI_PROMPT.md"],
   };
+}
+
+function assertRunDir(targetPath) {
+  const resolved = assertInsideUserSpace(targetPath);
+  const root = path.resolve(runRootDir);
+  if (resolved === root || !resolved.startsWith(root + path.sep)) {
+    throw new Error(`运行目录必须位于工作区 runs 下：${resolved}`);
+  }
+  return resolved;
+}
+
+async function readRun(runDir) {
+  const resolved = assertRunDir(runDir);
+  const manifestPath = path.join(resolved, "run.json");
+  try {
+    const run = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    const draftsDir = path.resolve(String(run.draftsDir || ""));
+    if (!run.runId || !run.productSlug || !run.domainSlug || !run.draftsDir) throw new Error("字段不完整");
+    if (draftsDir !== path.join(resolved, "drafts")) throw new Error("草稿目录不属于当前任务");
+    return { ...run, draftsDir, runDir: resolved, manifestPath };
+  } catch {
+    throw new Error(`无效的业务域任务，缺少或无法读取 run.json：${resolved}`);
+  }
+}
+
+async function updateRun(runDir, changes, eventType) {
+  const run = await readRun(runDir);
+  const now = new Date().toISOString();
+  const updated = {
+    ...run,
+    ...changes,
+    updatedAt: now,
+    lifecycle: [
+      ...(Array.isArray(run.lifecycle) ? run.lifecycle : []),
+      ...(eventType ? [{ type: eventType, at: now }] : []),
+    ],
+  };
+  delete updated.runDir;
+  delete updated.manifestPath;
+  const manifestPath = path.join(runDir, "run.json");
+  await fs.writeFile(manifestPath, JSON.stringify(updated, null, 2) + "\n");
+  return { ...updated, runDir, manifestPath };
+}
+
+async function recoverInterruptedRuns() {
+  let entries = [];
+  try {
+    entries = await fs.readdir(runRootDir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
+  let recovered = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const runDir = path.join(runRootDir, entry.name);
+    try {
+      const run = await readRun(runDir);
+      if (run.status !== "executing") continue;
+      await updateRun(runDir, {
+        status: "interrupted",
+        activeExecution: null,
+        lastExecution: {
+          ...run.activeExecution,
+          status: "interrupted",
+          finishedAt: new Date().toISOString(),
+        },
+      }, "execution_interrupted");
+      recovered += 1;
+    } catch {
+      // Ignore legacy or incomplete run directories.
+    }
+  }
+  return recovered;
+}
+
+async function validateKnowledgeAssets(draftsDir) {
+  const resolved = assertInsideUserSpace(draftsDir);
+  const required = [
+    "ontology/node-types.yaml",
+    "ontology/relation-types.yaml",
+    "ontology/concept-types.yaml",
+    "rules/validation-rules.yaml",
+  ];
+  const errors = [];
+  const warnings = [];
+  const yamlDocuments = new Map();
+  let domainSlugs = [];
+  try {
+    domainSlugs = (await fs.readdir(path.join(resolved, "domains"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    errors.push("缺少 domains 目录");
+  }
+  if (domainSlugs.length === 0 && errors.length === 0) errors.push("domains 目录中没有业务域");
+  for (const domainSlug of domainSlugs) {
+    required.push(
+      `domains/${domainSlug}/overview.md`,
+      `domains/${domainSlug}/flows.md`,
+      `domains/${domainSlug}/pitfalls.md`,
+      `domains/${domainSlug}/glossary.yaml`,
+      `domains/${domainSlug}/concepts.yaml`,
+      `domains/${domainSlug}/capabilities.yaml`,
+      `domains/${domainSlug}/rules.yaml`,
+      `graph/curated/${domainSlug}.graph.yaml`,
+      `mappings/${domainSlug}.mapping.yaml`,
+    );
+  }
+  for (const relativePath of required) {
+    try {
+      const content = await fs.readFile(path.join(resolved, relativePath), "utf8");
+      if (!content.trim()) errors.push(`文件为空：${relativePath}`);
+      else {
+        if (/需补充|待补充/.test(content)) errors.push(`仍包含待补充内容：${relativePath}`);
+        if (/\.ya?ml$/i.test(relativePath)) {
+          try {
+            yamlDocuments.set(relativePath, parseYaml(content));
+          } catch (error) {
+            errors.push(`YAML 语法错误：${relativePath}（${error.message.split("\n")[0]}）`);
+          }
+        }
+      }
+    } catch {
+      errors.push(`缺少文件：${relativePath}`);
+    }
+  }
+
+  const nodeDefinitions = yamlDocuments.get("ontology/node-types.yaml")?.node_types || [];
+  const relationDefinitions = yamlDocuments.get("ontology/relation-types.yaml")?.relation_types || [];
+  const conceptDefinitions = yamlDocuments.get("ontology/concept-types.yaml")?.concept_types || [];
+  const nodeTypes = new Map(nodeDefinitions.map((item) => [item.type, item]));
+  const relationTypes = new Map(relationDefinitions.map((item) => [item.rel, item]));
+  const conceptTypes = new Set(conceptDefinitions.map((item) => item.type));
+
+  for (const domainSlug of domainSlugs) {
+    const concepts = yamlDocuments.get(`domains/${domainSlug}/concepts.yaml`)?.concepts || [];
+    const capabilities = yamlDocuments.get(`domains/${domainSlug}/capabilities.yaml`)?.capabilities || [];
+    const businessRules = yamlDocuments.get(`domains/${domainSlug}/rules.yaml`)?.rules || [];
+    const graph = yamlDocuments.get(`graph/curated/${domainSlug}.graph.yaml`) || {};
+    const mapping = yamlDocuments.get(`mappings/${domainSlug}.mapping.yaml`) || {};
+    const conceptIds = new Set(concepts.map((item) => item.id).filter(Boolean));
+    const capabilityIds = new Set(capabilities.map((item) => item.id).filter(Boolean));
+    const nodeById = new Map();
+
+    for (const concept of concepts) {
+      if (!concept.id || !concept.name || !concept.type || !concept.desc) errors.push(`业务概念缺少必填字段：${domainSlug}`);
+      if (concept.type && !conceptTypes.has(concept.type)) errors.push(`未定义的业务概念类型：${concept.type}`);
+      for (const relatedId of Array.isArray(concept.related) ? concept.related : []) {
+        if (!conceptIds.has(relatedId) && !String(relatedId).includes(":")) warnings.push(`跨域概念引用未明确登记：${relatedId}`);
+      }
+    }
+    for (const capability of capabilities) {
+      const linkedConcepts = Array.isArray(capability.concepts) ? capability.concepts : [];
+      if (linkedConcepts.length === 0) errors.push(`业务能力未关联概念：${capability.id || domainSlug}`);
+      for (const conceptId of linkedConcepts) {
+        if (!conceptIds.has(conceptId)) errors.push(`业务能力引用不存在的概念：${capability.id || domainSlug} -> ${conceptId}`);
+      }
+    }
+    for (const node of Array.isArray(graph.nodes) ? graph.nodes : []) {
+      if (!node.id || !node.type) {
+        errors.push(`图谱节点缺少 id 或 type：${domainSlug}`);
+        continue;
+      }
+      if (nodeById.has(node.id)) errors.push(`图谱节点 id 重复：${node.id}`);
+      nodeById.set(node.id, node);
+      const definition = nodeTypes.get(node.type);
+      if (!definition) errors.push(`未定义的图谱节点类型：${node.type}`);
+      for (const property of definition?.required || []) {
+        if (node[property] === undefined || node[property] === null || node[property] === "") errors.push(`图谱节点缺少必填属性：${node.id}.${property}`);
+      }
+    }
+    for (const edge of Array.isArray(graph.edges) ? graph.edges : []) {
+      const definition = relationTypes.get(edge.rel);
+      const fromNode = nodeById.get(edge.from);
+      const toNode = nodeById.get(edge.to);
+      if (!definition) errors.push(`未定义的图谱关系：${edge.rel || "<empty>"}`);
+      if (!fromNode) errors.push(`图谱关系起点不存在：${edge.from || "<empty>"}`);
+      if (!toNode) errors.push(`图谱关系终点不存在：${edge.to || "<empty>"}`);
+      if (definition && fromNode && !definition.from?.includes(fromNode.type)) errors.push(`图谱关系起点类型不匹配：${edge.rel} ${fromNode.type}`);
+      if (definition && toNode && !definition.to?.includes(toNode.type)) errors.push(`图谱关系终点类型不匹配：${edge.rel} ${toNode.type}`);
+    }
+
+    const capabilityMappings = Array.isArray(mapping.capability_mappings) ? mapping.capability_mappings : [];
+    const ruleMappings = Array.isArray(mapping.rule_mappings) ? mapping.rule_mappings : [];
+    const mappedCapabilities = new Set();
+    for (const item of capabilityMappings) {
+      const capabilityId = item.capability_id || item.capability || item.id;
+      if (capabilityId) mappedCapabilities.add(capabilityId);
+      if (capabilityId && !capabilityIds.has(capabilityId)) errors.push(`映射引用不存在的业务能力：${capabilityId}`);
+      const graphNodes = item.graph_nodes || item.nodes || item.code_nodes || [];
+      if (!Array.isArray(graphNodes) || graphNodes.length === 0) errors.push(`业务能力映射缺少代码节点：${capabilityId || domainSlug}`);
+      for (const nodeId of Array.isArray(graphNodes) ? graphNodes : []) {
+        if (!nodeById.has(nodeId)) errors.push(`业务能力映射引用不存在的图谱节点：${nodeId}`);
+      }
+    }
+    for (const capabilityId of capabilityIds) {
+      if (!mappedCapabilities.has(capabilityId)) errors.push(`业务能力缺少代码映射：${capabilityId}`);
+    }
+    const mappedRules = new Set(ruleMappings.map((item) => item.rule_id || item.rule || item.id).filter(Boolean));
+    for (const rule of businessRules) {
+      if (rule.severity === "high" && !mappedRules.has(rule.id)) errors.push(`高优先级规则缺少代码映射：${rule.id}`);
+    }
+    for (const item of ruleMappings) {
+      for (const nodeId of item.graph_nodes || item.nodes || item.code_nodes || []) {
+        if (!nodeById.has(nodeId)) errors.push(`规则映射引用不存在的图谱节点：${nodeId}`);
+      }
+    }
+  }
+  return {
+    valid: errors.length === 0,
+    checkedAt: new Date().toISOString(),
+    draftsDir: resolved,
+    domainSlugs,
+    checkedFiles: required.length,
+    errors,
+    warnings,
+  };
+}
+
+async function validateRun(runDir) {
+  const run = await readRun(runDir);
+  const validation = await validateKnowledgeAssets(run.draftsDir);
+  const updated = await updateRun(run.runDir, {
+    status: validation.valid ? "validated" : "validation_failed",
+    validation,
+  }, validation.valid ? "validated" : "validation_failed");
+  return { run: updated, validation };
+}
+
+async function exportRun(runDir, outputRootDir) {
+  const run = await readRun(runDir);
+  const validation = await validateKnowledgeAssets(run.draftsDir);
+  if (!validation.valid) throw new Error(`知识资产校验失败：${validation.errors.join("；")}`);
+  const resolvedOutputRoot = assertInsideUserSpace(outputRootDir || run.outputRootDir || knowledgeRootDir);
+  const exportDir = path.join(resolvedOutputRoot, "code-knowledge", run.productSlug, run.domainSlug);
+  const result = await exportKnowledgeAssets(run.draftsDir, exportDir);
+  const exportedAt = new Date().toISOString();
+  const updated = await updateRun(run.runDir, {
+    status: "exported",
+    outputRootDir: resolvedOutputRoot,
+    exportDir,
+    validation,
+    lastExport: { exportedAt, exportDir, copied: result.copied },
+  }, "exported");
+  return { run: updated, validation, outputRootDir: resolvedOutputRoot, exportDir, ...result };
 }
 
 function assertMaterialDir(targetPath) {
@@ -462,12 +723,12 @@ async function createDomainFromMaterial(payload, taskId = crypto.randomUUID()) {
   if (!domainName) throw new Error("请填写业务域名称");
   const domainScope = String(payload.domainScope || "").trim();
   const domainSlug = slugify(payload.domainSlug || domainName);
-  if (!payload.knowledgeRagDocsDir) throw new Error("请选择 knowledge-rag 文档目录");
-  const knowledgeRagDocsDir = assertInsideUserSpace(payload.knowledgeRagDocsDir);
+  const configuredOutputRoot = payload.outputRootDir || knowledgeRootDir;
+  const outputRootDir = assertInsideUserSpace(configuredOutputRoot);
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${productSlug}-${domainSlug}`;
   const runDir = path.join(runRootDir, runId);
   const draftsDir = path.join(runDir, "drafts");
-  const publishDir = path.join(knowledgeRagDocsDir, "code-knowledge", productSlug, domainSlug);
+  const exportDir = path.join(outputRootDir, "code-knowledge", productSlug, domainSlug);
   await fs.mkdir(runDir, { recursive: true });
 
   emit("task", { taskId, taskType: "domain", status: "running", step: "drafts" });
@@ -486,8 +747,31 @@ async function createDomainFromMaterial(payload, taskId = crypto.randomUUID()) {
   }));
   await fs.writeFile(
     path.join(runDir, "README.md"),
-    `# ${productName} / ${domainName} 知识库构建任务\n\n- 产品或业务中心：${productName}\n- 业务域：${domainName}\n- 业务域边界：${domainScope || "未填写"}\n- 中心原料：${material.materialDir}\n- 原料生成时间：${material.createdAt}\n- 关联服务：${material.repositories.map((repo) => repo.name).join("、") || "无"}\n- 运行目录：${runDir}\n- 转换资料：${material.convertedDocsDir}\n- 多仓库清单：${material.repoManifestPath}\n- 草稿目录：${draftsDir}\n- AI 提示词：${promptPath}\n- 发布目录：${publishDir}\n\n下一步：复制 AI_PROMPT.md 给 AI 执行，人工校准 drafts 后发布入库，并通过 knowledge-rag MCP 调用 reindex_documents(force=true)。\n`,
+    `# ${productName} / ${domainName} 知识库构建任务\n\n- 产品或业务中心：${productName}\n- 业务域：${domainName}\n- 业务域边界：${domainScope || "未填写"}\n- 中心原料：${material.materialDir}\n- 原料生成时间：${material.createdAt}\n- 关联服务：${material.repositories.map((repo) => repo.name).join("、") || "无"}\n- 运行目录：${runDir}\n- 转换资料：${material.convertedDocsDir}\n- 多仓库清单：${material.repoManifestPath}\n- 草稿目录：${draftsDir}\n- AI 提示词：${promptPath}\n- 建议导出目录：${exportDir}\n\n下一步：使用 AI_PROMPT.md 补全知识资产，人工校准并通过校验后，导出到任意知识库、Git 仓库或文档系统。\n`,
   );
+
+  const createdAt = new Date().toISOString();
+  const runManifest = {
+    version: 1,
+    runId,
+    taskId,
+    status: "draft_ready",
+    createdAt,
+    updatedAt: createdAt,
+    productName,
+    productSlug,
+    domainName,
+    domainSlug,
+    domainScope,
+    materialDir: material.materialDir,
+    materialId: material.materialId,
+    draftsDir,
+    promptPath,
+    outputRootDir,
+    exportDir,
+    lifecycle: [{ type: "draft_ready", at: createdAt }],
+  };
+  await fs.writeFile(path.join(runDir, "run.json"), JSON.stringify(runManifest, null, 2) + "\n");
 
   return {
     taskId,
@@ -505,8 +789,9 @@ async function createDomainFromMaterial(payload, taskId = crypto.randomUUID()) {
     repositories: material.repositories,
     draftsDir,
     promptPath,
-    publishDir,
-    knowledgeRagDocsDir,
+    exportDir,
+    outputRootDir,
+    runManifestPath: path.join(runDir, "run.json"),
   };
 }
 
@@ -518,11 +803,52 @@ async function buildKnowledgeBase(payload, taskId = crypto.randomUUID()) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, workspaceDir, runRootDir, materialRootDir });
+  res.json({ ok: true, workspaceDir, runRootDir, materialRootDir, knowledgeRootDir });
 });
 
 app.get("/api/materials", async (_req, res) => {
   res.json({ materials: await listMaterials() });
+});
+
+app.get("/api/executors", async (_req, res) => {
+  try {
+    res.json({ executors: await detectExecutors({ cwd: rootDir }) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/executions", (_req, res) => {
+  res.json({ executions: listExecutions() });
+});
+
+app.get("/api/executions/:executionId", (req, res) => {
+  const execution = getExecution(req.params.executionId);
+  if (!execution) return res.status(404).json({ error: "执行任务不存在" });
+  return res.json({ execution });
+});
+
+app.get("/api/runs/:runId", async (req, res) => {
+  try {
+    res.json({ run: await readRun(path.join(runRootDir, req.params.runId)) });
+  } catch (error) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+app.post("/api/executions", async (req, res) => {
+  try {
+    const { completion: _completion, ...execution } = await launchRunExecution(req.body || {});
+    res.status(202).json(execution);
+  } catch (error) {
+    res.status(executionErrorStatus(error)).json({ error: error.message, code: error.code });
+  }
+});
+
+app.delete("/api/executions/:executionId", (req, res) => {
+  const cancelled = cancelExecution(req.params.executionId);
+  if (!cancelled) return res.status(404).json({ error: "没有可取消的执行任务" });
+  return res.json({ ok: true, executionId: req.params.executionId });
 });
 
 function startAsyncTask(req, res, taskType, action) {
@@ -536,6 +862,156 @@ function startAsyncTask(req, res, taskType, action) {
       emit("task", { taskId, taskType, status: "failed", error: error.message });
     }
   });
+}
+
+function executionErrorStatus(error) {
+  if (error?.code === "EXECUTION_BUSY") return 409;
+  if (error?.code === "UNKNOWN_EXECUTOR" || error?.code === "PROMPT_REQUIRED") return 400;
+  if (error?.code === "EXECUTOR_NOT_INSTALLED") return 422;
+  return 400;
+}
+
+function sanitizeExecutionOutput(value) {
+  return String(value || "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
+
+const executionLogViews = new Map();
+
+function summarizeExecutionOutput(executionId, stream, value) {
+  const text = sanitizeExecutionOutput(value).trim();
+  if (!text) return null;
+  const state = executionLogViews.get(executionId) || { bytes: 0, lastAt: 0, announced: new Set(), texts: new Set() };
+  state.bytes += Buffer.byteLength(text);
+  const now = Date.now();
+  let message = "";
+  for (const line of text.split(/\r?\n/).filter(Boolean)) {
+    try {
+      const event = JSON.parse(line);
+      const type = event.type || event.message?.type;
+      const content = event.message?.content;
+      const tool = Array.isArray(content) ? content.find((item) => item?.type === "tool_use") : null;
+      if (tool?.name) {
+        const input = tool.input || {};
+        const target = input.file_path || input.path || input.pattern || input.command;
+        const key = `tool:${tool.name}:${target || ""}`;
+        if (!state.announced.has(key)) {
+          state.announced.add(key);
+          message = target ? `AI 调用 ${tool.name}：${String(target).slice(0, 160)}` : `AI 调用工具：${tool.name}`;
+        }
+      } else if (type === "assistant" || type === "text") {
+        const textContent = Array.isArray(content)
+          ? content.filter((item) => item?.type === "text").map((item) => item.text).join(" ")
+          : typeof content === "string" ? content : event.text;
+        const concise = String(textContent || "").replace(/\s+/g, " ").trim();
+        if (concise && !state.texts.has(concise)) {
+          state.texts.add(concise);
+          message = `AI 工作摘要：${concise.slice(0, 220)}${concise.length > 220 ? "..." : ""}`;
+        }
+      } else if (type === "result" && !state.announced.has("result")) {
+        state.announced.add("result");
+        message = "AI 已返回整理结果，正在写入知识资产";
+      }
+    } catch {
+      // Streaming chunks can contain partial JSON or plain progress text.
+    }
+  }
+  if (!message && stream === "stderr") message = text.slice(0, 240);
+  if (!message && now - state.lastAt >= 800) message = `AI 处理中，已接收约 ${Math.round(state.bytes / 1024)} KB 输出`;
+  if (message) state.lastAt = now;
+  executionLogViews.set(executionId, state);
+  return message;
+}
+
+async function appendExecutionLog(runDir, event) {
+  if (event.type !== "stdout" && event.type !== "stderr") return;
+  const prefix = event.type === "stderr" ? "[err] " : "[out] ";
+  await fs.appendFile(path.join(runDir, "execution.log"), `${prefix}${event.data}`);
+}
+
+async function launchRunExecution(payload) {
+  if (!payload?.runDir) throw new Error("必须提供业务域运行目录");
+  if (!payload?.executor) throw new Error("必须选择 Codex 或 Claude 执行器");
+  const run = await readRun(payload.runDir);
+  const executor = String(payload.executor || "").trim();
+  const started = await startExecution({
+    executor,
+    runDir: run.runDir,
+    runRootDir,
+    promptPath: run.promptPath,
+    onEvent(event) {
+      appendExecutionLog(run.runDir, event).catch(() => {});
+      if (event.type === "stdout" || event.type === "stderr") {
+        const message = summarizeExecutionOutput(event.executionId, event.type, event.data);
+        if (message) emit("log", {
+          taskId: event.executionId,
+          executionId: event.executionId,
+          level: event.type === "stderr" ? "stderr" : "info",
+          message,
+        });
+      }
+      emit("execution", { ...event, runId: run.runId, executor });
+    },
+  });
+  await updateRun(run.runDir, {
+    status: "executing",
+    activeExecution: {
+      executionId: started.executionId,
+      executor,
+      startedAt: new Date().toISOString(),
+    },
+  }, "execution_started");
+
+  started.completion.then(async (processResult) => {
+    executionLogViews.delete(started.executionId);
+    const validation = await validateKnowledgeAssets(run.draftsDir);
+    const status = validation.valid ? "completed" : "validation_failed";
+    const updated = await updateRun(run.runDir, {
+      status,
+      activeExecution: null,
+      lastExecution: {
+        executionId: started.executionId,
+        executor,
+        status: "completed",
+        finishedAt: new Date().toISOString(),
+        processResult,
+      },
+      validation,
+    }, validation.valid ? "execution_completed" : "execution_validation_failed");
+    emit("task", {
+      taskId: started.executionId,
+      executionId: started.executionId,
+      taskType: "execution",
+      status: validation.valid ? "done" : "failed",
+      step: "validate",
+      result: { run: updated, validation },
+      error: validation.valid ? undefined : `知识资产校验失败：${validation.errors.join("；")}`,
+    });
+  }).catch(async (error) => {
+    executionLogViews.delete(started.executionId);
+    const cancelled = error?.code === "EXECUTION_CANCELLED";
+    const updated = await updateRun(run.runDir, {
+      status: cancelled ? "cancelled" : "failed",
+      activeExecution: null,
+      lastExecution: {
+        executionId: started.executionId,
+        executor,
+        status: cancelled ? "cancelled" : "failed",
+        errorCode: error?.code || "EXECUTION_FAILED",
+        finishedAt: new Date().toISOString(),
+      },
+    }, cancelled ? "execution_cancelled" : "execution_failed").catch(() => null);
+    emit("task", {
+      taskId: started.executionId,
+      executionId: started.executionId,
+      taskType: "execution",
+      status: cancelled ? "cancelled" : "failed",
+      error: error.message,
+      result: updated ? { run: updated } : undefined,
+    });
+  });
+  return { executionId: started.executionId, executor, runId: run.runId, runDir: run.runDir, completion: started.completion };
 }
 
 app.post("/api/materials", (req, res) => startAsyncTask(req, res, "material", createCenterMaterial));
@@ -554,7 +1030,7 @@ app.get("/api/suggestions", (_req, res) => {
     suggestions: [
       path.join(os.homedir(), "Documents", "work"),
       path.join(os.homedir(), "Documents", "personal"),
-      path.join(os.homedir(), "Documents", "work", "knowledge-rag", "documents"),
+      knowledgeRootDir,
     ],
   });
 });
@@ -598,21 +1074,40 @@ app.post("/api/build", async (req, res) => {
   startAsyncTask(req, res, "domain", buildKnowledgeBase);
 });
 
-app.post("/api/publish", async (req, res) => {
+app.post("/api/runs/:runId/validate", async (req, res) => {
   try {
-    const draftsDir = assertInsideUserSpace(req.body.draftsDir);
-    const publishDir = req.body.publishDir
-      ? assertInsideUserSpace(req.body.publishDir)
-      : path.join(
-          assertInsideUserSpace(req.body.knowledgeRagDocsDir),
-          "code-knowledge",
-          slugify(req.body.productSlug || req.body.productName || req.body.serviceSlug || req.body.serviceName),
-          slugify(req.body.domainSlug || req.body.domainName),
-        );
-    const result = await publishKnowledgeAssets(draftsDir, publishDir);
-    res.json({ ok: true, publishDir, ...result });
-    emit("log", { level: "info", message: `已发布知识资产：${result.copied.join(", ")} -> ${publishDir}` });
-    emit("log", { level: "info", message: `已跳过非知识库文件：${result.skipped.join(", ")}` });
+    const result = await validateRun(path.join(runRootDir, req.params.runId));
+    res.status(result.validation.valid ? 200 : 422).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/runs/:runId/exports", async (req, res) => {
+  try {
+    const result = await exportRun(path.join(runRootDir, req.params.runId), req.body?.outputRootDir);
+    res.json({ ok: true, ...result });
+    emit("log", { level: "info", message: `已导出知识资产：${result.copied.join(", ")} -> ${result.exportDir}` });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/validate", async (req, res) => {
+  try {
+    if (!req.body?.runDir) throw new Error("必须提供业务域运行目录");
+    const result = await validateRun(req.body.runDir);
+    res.status(result.validation.valid ? 200 : 422).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/export", async (req, res) => {
+  try {
+    if (!req.body?.runDir) throw new Error("必须提供业务域运行目录");
+    const result = await exportRun(req.body.runDir, req.body.outputRootDir || req.body.outputDir);
+    res.json({ ok: true, ...result });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -639,12 +1134,20 @@ function parseCliBuildArgs(argv) {
     } else if (arg === "--docs") {
       result.rawDocsDir = next;
       i += 1;
-    } else if (arg === "--knowledge-rag-docs") {
-      result.knowledgeRagDocsDir = next;
+    } else if (arg === "--output" || arg === "--output-dir") {
+      result.outputRootDir = next;
+      i += 1;
+    } else if (arg === "--run") {
+      result.runDir = next;
+      i += 1;
+    } else if (arg === "--executor") {
+      result.executor = next;
       i += 1;
     } else if (arg === "--material") {
       result.materialDir = next;
       i += 1;
+    } else {
+      throw new Error(`未知参数：${arg}`);
     }
   }
   return result;
@@ -654,13 +1157,40 @@ if (!isMainModule) {
   // Imported by tests or other local tooling.
 } else if (cliMode) {
   const payload = parseCliBuildArgs(process.argv.slice(3));
-  const action = cliCommand === "material"
-    ? createCenterMaterial
-    : cliCommand === "domain"
-      ? createDomainFromMaterial
-      : buildKnowledgeBase;
+  const action = cliCommand === "executors"
+    ? () => detectExecutors({ cwd: rootDir })
+    : cliCommand === "execute"
+      ? () => launchRunExecution(payload)
+      : cliCommand === "validate"
+    ? () => validateRun(payload.runDir)
+    : cliCommand === "export"
+      ? () => exportRun(payload.runDir, payload.outputRootDir)
+      : cliCommand === "material"
+        ? createCenterMaterial
+        : cliCommand === "domain"
+          ? createDomainFromMaterial
+          : buildKnowledgeBase;
   action(payload)
-    .then((result) => {
+    .then(async (result) => {
+      if (cliCommand === "executors") {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      if (cliCommand === "execute") {
+        console.log(`AI 执行任务已启动：${result.executionId}`);
+        await result.completion;
+        console.log("AI 执行已完成，请运行 kb validate 校验产物。 ");
+        return;
+      }
+      if (cliCommand === "validate") {
+        console.log(JSON.stringify(result.validation, null, 2));
+        if (!result.validation.valid) process.exitCode = 1;
+        return;
+      }
+      if (cliCommand === "export") {
+        console.log(`知识资产已导出：${result.exportDir}`);
+        return;
+      }
       if (cliCommand === "material") {
         console.log("\n中心原料已生成：");
         console.log(`原料目录：${result.materialDir}`);
@@ -674,7 +1204,7 @@ if (!isMainModule) {
       if (result.domainScope) console.log(`业务域边界：${result.domainScope}`);
       console.log(`草稿目录：${result.draftsDir}`);
       console.log(`AI 提示词：${result.promptPath}`);
-      console.log(`建议发布目录：${result.publishDir}`);
+      console.log(`建议导出目录：${result.exportDir}`);
     })
     .catch((error) => {
       console.error(error.message);
@@ -691,20 +1221,29 @@ if (!isMainModule) {
 
   server.listen(defaultPort, async () => {
     const url = `http://127.0.0.1:${defaultPort}`;
+    const recoveredRuns = await recoverInterruptedRuns();
     console.log(`Knowledge Builder 已启动：${url}`);
+    if (recoveredRuns) console.log(`已将 ${recoveredRuns} 个中断的 AI 任务标记为 interrupted。`);
     if (!process.argv.includes("--no-open")) await open(url);
   });
 }
 
 export {
+  assertRunDir,
   buildKnowledgeBase,
   buildPrompt,
   createCenterMaterial,
   createDomainFromMaterial,
+  exportKnowledgeAssets,
+  exportRun,
   listMaterials,
   normalizeRepoPaths,
-  publishKnowledgeAssets,
+  parseCliBuildArgs,
   readMaterial,
+  readRun,
   slugify,
+  updateRun,
+  validateKnowledgeAssets,
+  validateRun,
   writeDraftTemplates,
 };
